@@ -1,0 +1,98 @@
+name: Unzip Archive to Repository
+
+on:
+  # 1. 当向仓库上传或推送任何 .zip 文件时自动触发解压
+  push:
+    paths:
+      - '**.zip'
+  # 2. 支持在 Actions 页面手动触发并指定参数
+  workflow_dispatch:
+    inputs:
+      zip_path:
+        description: '要解压的 ZIP 文件路径（留空则自动查找仓库内的 .zip 文件）'
+        required: false
+        default: ''
+      target_dir:
+        description: '解压目标目录（默认为仓库根目录 .）'
+        required: false
+        default: '.'
+      delete_zip_after_extract:
+        description: '解压成功后是否删除原 ZIP 文件 (true / false)'
+        required: false
+        default: 'true'
+
+# 授予默认 GITHUB_TOKEN 写入仓库代码的权限
+permissions:
+  contents: write
+
+jobs:
+  unzip-and-commit:
+    name: Extract ZIP & Commit to Branch
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 1. Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 2. Locate and Extract ZIP Archive
+        env:
+          INPUT_ZIP: ${{ github.event.inputs.zip_path }}
+          TARGET_DIR: ${{ github.event.inputs.target_dir || '.' }}
+          DELETE_ZIP: ${{ github.event.inputs.delete_zip_after_extract || 'true' }}
+        run: |
+          set -e
+
+          # 确定目标 ZIP 文件
+          if [ -n "$INPUT_ZIP" ] && [ -f "$INPUT_ZIP" ]; then
+            ZIP_FILE="$INPUT_ZIP"
+          elif [ -f "ArgonScanPro_iOS_Xcode_Source.zip" ]; then
+            ZIP_FILE="ArgonScanPro_iOS_Xcode_Source.zip"
+          else
+            ZIP_FILE=$(find . -maxdepth 2 -name "*.zip" -not -path "./.git/*" | head -n 1)
+          fi
+
+          if [ -z "$ZIP_FILE" ] || [ ! -f "$ZIP_FILE" ]; then
+            echo "未在仓库中找到可解压的 .zip 文件！"
+            exit 1
+          fi
+
+          echo "找到压缩包: $ZIP_FILE"
+          mkdir -p "$TARGET_DIR"
+
+          # 解压并覆盖同名文件，过滤 macOS 隐藏元数据
+          unzip -o "$ZIP_FILE" -d "$TARGET_DIR" -x "__MACOSX/*" "*.DS_Store"
+
+          # 根据配置决定是否清理原 .zip 文件
+          if [ "$DELETE_ZIP" = "true" ]; then
+            echo "正在移除原压缩包: $ZIP_FILE"
+            rm -f "$ZIP_FILE"
+          fi
+
+      - name: 3. Commit & Push Extracted Files to Repository
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add -A
+
+          if git diff --staged --quiet; then
+            echo "没有检测到文件变更，无需提交。"
+            exit 0
+          fi
+
+          git commit -m "chore: extract zip archive to repository [skip ci]"
+
+          # 优先尝试完整推送；若 ZIP 内含 .github/workflows/* 且默认 GITHUB_TOKEN 缺少 workflows 权限，则自动排除工作流目录后推送源码
+          if ! git push origin HEAD:${GITHUB_REF_NAME}; then
+            echo "检测到默认 GITHUB_TOKEN 无法直接写入 .github/workflows/，自动排除工作流文件后重新提交工程源码..."
+            git reset --soft HEAD~1
+            git reset HEAD .github/workflows/ || true
+            git checkout -- .github/workflows/ 2>/dev/null || true
+            git clean -fd .github/workflows/ 2>/dev/null || true
+            git add -A ':!.github/workflows/*'
+            git commit -m "chore: extract project source files from zip"
+            git push origin HEAD:${GITHUB_REF_NAME}
+          fi
