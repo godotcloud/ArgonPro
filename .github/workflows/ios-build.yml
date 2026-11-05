@@ -42,13 +42,19 @@ jobs:
         with:
           xcode-version: latest-stable
 
-      - name: 4. Generate Xcode Project via XcodeGen
+      - name: 4. Generate Xcode Project & Enforce TCC Privacy Keys in Info.plist
         run: |
           if ! command -v xcodegen &> /dev/null; then
             brew install xcodegen
           fi
           xcodegen generate
-          ls -la ArgonScanPro.xcodeproj
+
+          # 强制写入相机、陀螺仪与相册隐私权限描述，防止 XcodeGen 覆盖 Info.plist 导致点击 Start Capture 闪退
+          plutil -replace NSCameraUsageDescription -string "ArgonScan Pro 需要访问后置三摄、LiDAR 激光雷达与前置原深感相机以执行高精度 3D 扫描。" App/Info.plist
+          plutil -replace NSMotionUsageDescription -string "ArgonScan Pro 需要读取陀螺仪与加速计数据以执行 100Hz 运动模糊过滤。" App/Info.plist
+          plutil -replace NSPhotoLibraryAddUsageDescription -string "ArgonScan Pro 需要访问相册以保存扫描结果。" App/Info.plist
+          plutil -replace CADisableMinimumFrameDurationOnPhone -bool YES App/Info.plist
+          plutil -p App/Info.plist
 
       - name: 5. Build Unsigned Release App & Package .ipa (Default / Sideload Mode)
         if: ${{ github.event.inputs.signed_build != 'true' }}
@@ -61,7 +67,12 @@ jobs:
             -derivedDataPath build \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO
+            CODE_SIGNING_ALLOWED=NO \
+            INFOPLIST_KEY_NSCameraUsageDescription="ArgonScan Pro 需要访问相机与 LiDAR 进行 3D 扫描" \
+            INFOPLIST_KEY_NSMotionUsageDescription="ArgonScan Pro 需要访问运动传感器进行防抖"
+
+          # 校验编译产物 Info.plist 中的 NSCameraUsageDescription
+          plutil -p build/Build/Products/Release-iphoneos/ArgonScanPro.app/Info.plist | grep -i Camera
 
           mkdir -p Payload
           cp -r build/Build/Products/Release-iphoneos/ArgonScanPro.app Payload/
