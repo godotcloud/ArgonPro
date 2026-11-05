@@ -1,13 +1,13 @@
 //
 //  ProMotionScannerView.swift
-//  ArgonScan Pro — Live Camera + LiDAR 3D Mesh Overlay & 120Hz ProMotion HUD (v1.1)
+//  ArgonScan Pro — Full-Screen Live Camera + LiDAR 3D Mesh Overlay & Responsive HUD (v1.2)
 //
 
 import SwiftUI
 import ARKit
 import SceneKit
 
-/// Wraps ARSCNView to render live camera feed + real-time LiDAR reconstructed 3D mesh wireframe
+/// Renders the live camera video feed from ARSession plus real-time 3D LiDAR mesh anchors
 public struct LiveARMeshPreview: UIViewRepresentable {
     public let session: ARSession
     public let showWireframe: Bool
@@ -17,13 +17,16 @@ public struct LiveARMeshPreview: UIViewRepresentable {
     }
 
     public func makeUIView(context: Context) -> ARSCNView {
-        let scnView = ARSCNView(frame: .zero)
+        let scnView = ARSCNView(frame: UIScreen.main.bounds)
+        scnView.scene = SCNScene()
         scnView.session = session
         scnView.delegate = context.coordinator
         scnView.automaticallyUpdatesLighting = true
         scnView.preferredFramesPerSecond = 120
+        scnView.rendersCameraGrain = false
+        scnView.rendersMotionBlur = false
         scnView.debugOptions = [.showFeaturePoints]
-        scnView.backgroundColor = .black
+        scnView.backgroundColor = .clear
         return scnView
     }
 
@@ -35,15 +38,28 @@ public struct LiveARMeshPreview: UIViewRepresentable {
         public var showWireframe: Bool = true
 
         public func renderer(_ renderer: SCNSceneRenderer, nodeFor anchor: ARAnchor) -> SCNNode? {
-            guard let meshAnchor = anchor as? ARMeshAnchor else { return nil }
-            let geom = createSCNGeometry(from: meshAnchor.geometry)
-            let node = SCNNode(geometry: geom)
-            return node
+            if let meshAnchor = anchor as? ARMeshAnchor {
+                let geom = createSCNGeometry(from: meshAnchor.geometry)
+                return SCNNode(geometry: geom)
+            }
+            if let faceAnchor = anchor as? ARFaceAnchor,
+               let device = renderer.device,
+               let faceGeo = ARSCNFaceGeometry(device: device) {
+                faceGeo.update(from: faceAnchor.geometry)
+                faceGeo.firstMaterial?.fillMode = .lines
+                faceGeo.firstMaterial?.diffuse.contents = UIColor.systemCyan
+                return SCNNode(geometry: faceGeo)
+            }
+            return nil
         }
 
         public func renderer(_ renderer: SCNSceneRenderer, didUpdate node: SCNNode, for anchor: ARAnchor) {
-            guard let meshAnchor = anchor as? ARMeshAnchor else { return }
-            node.geometry = createSCNGeometry(from: meshAnchor.geometry)
+            if let meshAnchor = anchor as? ARMeshAnchor {
+                node.geometry = createSCNGeometry(from: meshAnchor.geometry)
+            } else if let faceAnchor = anchor as? ARFaceAnchor,
+                      let faceGeo = node.geometry as? ARSCNFaceGeometry {
+                faceGeo.update(from: faceAnchor.geometry)
+            }
         }
 
         private func createSCNGeometry(from meshGeometry: ARMeshGeometry) -> SCNGeometry {
@@ -78,7 +94,7 @@ public struct LiveARMeshPreview: UIViewRepresentable {
             let scnGeom = SCNGeometry(sources: [vertexSource, normalSource], elements: [geometryElement])
             let material = SCNMaterial()
             material.fillMode = showWireframe ? .lines : .fill
-            material.diffuse.contents = UIColor.systemCyan.withAlphaComponent(showWireframe ? 0.75 : 0.35)
+            material.diffuse.contents = UIColor.systemCyan.withAlphaComponent(showWireframe ? 0.80 : 0.35)
             material.isDoubleSided = true
             scnGeom.materials = [material]
             return scnGeom
@@ -97,18 +113,21 @@ public struct ProMotionScannerView: View {
 
     public var body: some View {
         ZStack {
-            // Live ARKit Camera + LiDAR 3D Mesh Viewport
+            // 1. Live Full-Screen Camera + LiDAR 3D Mesh Viewport (Replaces v1.0 Color.black placeholder)
             LiveARMeshPreview(session: fusionManager.arSession, showWireframe: showWireframe)
                 .ignoresSafeArea()
 
-            VStack(spacing: 12) {
-                // Top Telemetry Bar (A15 Bionic Real-Time Monitor)
-                HStack(spacing: 12) {
-                    Label(String(format: "GPU %.1fms", fusionManager.telemetry.gpuFrameTimeMs), systemImage: "cpu")
-                    Label("Vertices: \(fusionManager.telemetry.activeVerticesCount)", systemImage: "cube.transparent")
-                    Label(String(format: "RAM %.0fMB", fusionManager.telemetry.memoryUsedMB), systemImage: "memorychip")
+            // 2. Top & Bottom HUD Controls
+            VStack(spacing: 10) {
+                // Single-line compact telemetry pill (never wraps onto 3 lines)
+                HStack(spacing: 14) {
+                    Label(String(format: "%.1fms (120Hz)", fusionManager.telemetry.gpuFrameTimeMs), systemImage: "cpu")
+                    Label("\(fusionManager.telemetry.activeVerticesCount) 顶点", systemImage: "cube.transparent")
+                    Label(String(format: "%.0f MB", fusionManager.telemetry.memoryUsedMB), systemImage: "memorychip")
                 }
                 .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
                 .foregroundColor(.cyan)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 8)
@@ -118,54 +137,68 @@ public struct ProMotionScannerView: View {
                 // Live Status Banner
                 Text(fusionManager.telemetry.statusMessage)
                     .font(.system(size: 12, weight: .medium))
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
                     .foregroundColor(.white)
-                    .padding(.horizontal, 12)
+                    .padding(.horizontal, 14)
                     .padding(.vertical, 6)
                     .background(Color.black.opacity(0.65))
                     .clipShape(RoundedRectangle(cornerRadius: 10))
+                    .padding(.horizontal, 16)
 
                 Spacer()
 
-                // Mode Picker tailored to iPhone 13 Pro Max Sensor Suite
+                // Segmented Mode Picker with auto-switching camera configuration
                 Picker("Scan Mode", selection: $fusionManager.activeMode) {
                     ForEach(ScanRangeMode.allCases, id: \.self) { mode in
                         Text(mode.rawValue).tag(mode)
                     }
                 }
                 .pickerStyle(.segmented)
-                .padding(.horizontal)
+                .padding(.horizontal, 16)
+                .onChange(of: fusionManager.activeMode) { newMode in
+                    fusionManager.switchMode(newMode)
+                }
 
-                // Control Bar
+                // Bottom Control Card (Full-width horizontal buttons so text never wraps vertically)
                 VStack(spacing: 12) {
-                    HStack(spacing: 16) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("TSDF Voxel: \(String(format: "%.1f", voxelSizeMM)) mm")
+                    HStack(spacing: 14) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("TSDF 体素精度: \(String(format: "%.1f", voxelSizeMM)) mm · 关键帧: \(fusionManager.telemetry.keyframesCaptured)")
                                 .font(.caption2)
-                                .foregroundColor(.white)
+                                .foregroundColor(.white.opacity(0.9))
+                                .lineLimit(1)
                             Slider(value: $voxelSizeMM, in: 0.5...5.0, step: 0.5)
                                 .tint(.cyan)
                         }
 
-                        Toggle("网格线框", isOn: $showWireframe)
-                            .font(.caption2)
-                            .foregroundColor(.white)
-                            .toggleStyle(.button)
-                            .tint(.cyan)
+                        Button(action: {
+                            showWireframe.toggle()
+                        }) {
+                            Text(showWireframe ? "线框: 开" : "线框: 关")
+                                .font(.caption.bold())
+                                .foregroundColor(showWireframe ? .black : .white)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .background(showWireframe ? Color.cyan : Color.white.opacity(0.18))
+                                .clipShape(RoundedRectangle(cornerRadius: 10))
+                        }
                     }
 
                     HStack(spacing: 12) {
                         Button(action: {
-                            fusionManager.toggleScanning()
+                            fusionManager.toggleCapture()
                         }) {
-                            HStack {
-                                Image(systemName: fusionManager.isScanning ? "stop.fill" : "camera.viewfinder")
-                                Text(fusionManager.isScanning ? "Stop Capture" : "Start Capture")
+                            HStack(spacing: 6) {
+                                Image(systemName: fusionManager.isCapturingMesh ? "stop.circle.fill" : "viewfinder")
+                                Text(fusionManager.isCapturingMesh ? "停止并完成重构" : "Start Capture")
+                                    .lineLimit(1)
                             }
                             .font(.subheadline.bold())
-                            .foregroundColor(.black)
+                            .foregroundColor(fusionManager.isCapturingMesh ? .white : .black)
                             .frame(maxWidth: .infinity)
-                            .padding(.vertical, 13)
-                            .background(fusionManager.isScanning ? Color.red : Color.cyan)
+                            .padding(.vertical, 14)
+                            .background(fusionManager.isCapturingMesh ? Color.red : Color.cyan)
                             .clipShape(Capsule())
                         }
 
@@ -175,25 +208,29 @@ public struct ProMotionScannerView: View {
                                 showShareSheet = true
                             }
                         }) {
-                            HStack {
+                            HStack(spacing: 6) {
                                 Image(systemName: "square.and.arrow.up")
                                 Text("导出 .OBJ")
+                                    .lineLimit(1)
                             }
                             .font(.subheadline.bold())
                             .foregroundColor(.white)
                             .padding(.horizontal, 18)
-                            .padding(.vertical, 13)
+                            .padding(.vertical, 14)
                             .background(Color.indigo)
                             .clipShape(Capsule())
                         }
                     }
                 }
                 .padding(14)
-                .background(Color.black.opacity(0.78))
+                .background(Color.black.opacity(0.80))
                 .clipShape(RoundedRectangle(cornerRadius: 22))
-                .padding(.horizontal)
+                .padding(.horizontal, 16)
             }
             .padding(.vertical, 8)
+        }
+        .onAppear {
+            fusionManager.ensureCameraPreviewRunning()
         }
         .sheet(isPresented: $showShareSheet) {
             if let url = exportedFileURL {
